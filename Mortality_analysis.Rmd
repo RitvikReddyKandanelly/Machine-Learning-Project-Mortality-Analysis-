@@ -1,0 +1,943 @@
+---
+title: "final_project"
+output: html_notebook
+---
+1. survival -- the number of months patient survived (has survived, if patient is still alive). Because all the patients had their heart attacks at different times, it is possible that some patients have survived less than one year but they are still alive. Check the second variable to confirm this. Such patients cannot be used for the prediction task mentioned above. 
+2. still-alive -- a binary variable. 0=dead at end of survival period, 1 means still alive 
+3. age-at-heart-attack -- age in years when heart attack occurred 
+4. pericardial-effusion -- binary. Pericardial effusion is fluid around the heart. 0=no fluid, 1=fluid 
+5. fractional-shortening -- a measure of contracility around the heart lower numbers are increasingly abnormal 
+6. epss -- E-point septal separation, another measure of contractility. Larger numbers are increasingly abnormal. 
+7. lvdd -- left ventricular end-diastolic dimension. This is a measure of the size of the heart at end-diastole. Large hearts tend to be sick hearts. 
+8. wall-motion-score -- a measure of how the segments of the left ventricle are moving 
+9. wall-motion-index -- equals wall-motion-score divided by number of segments seen. Usually 12-13 segments are seen in an echocardiogram. Use this variable INSTEAD of the wall motion score. 
+10. mult -- a derivate var which can be ignored 
+11. name -- the name of the patient (I have replaced them with "name") 
+12. group -- meaningless, ignore it 
+13. alive-at-1 -- Boolean-valued. Derived from the first two attributes. 0 means patient was either dead after 1 year or had been followed for less than 1 year. 1 means patient was alive at 1 year.
+
+#Data  Loading Preprocessing
+
+```{r}
+#reading and splitting the data into columns
+library(readxl)
+final <- read_excel("~/Course files/Machine_Learning/final.xlsx",  col_names = FALSE)
+View(final)
+
+#install.packages("splitstackshape")
+
+library(splitstackshape)
+
+data <- cSplit(final,"X__1" ,sep=",")
+
+head(data)
+
+
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+
+
+
+#assigning column names
+colnames(data) <- c("survival","still_alive","age_at_attack","pericardial_effusion","fractional_shortening","epss",
+                         "lrdd","wall_motion_score","wall_motion_index","malt","name","group","alive_at_1","")
+
+head(data)
+data <- data[,-14]
+
+data <- data[,c(-12,-11)]
+ 
+echo_data <- data
+
+
+
+
+```
+
+replacing question marks as nulls
+
+```{r}
+
+echo_data[echo_data == "?"] <- NA
+
+echo_data
+```
+
+Converting all the numerical variables to numerical format
+
+```{r}
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+
+echo_data_types <-  echo_data
+
+echo_data_types[,c(1,3,5,6,7,8,9,10)] <- lapply(echo_data_types[,c(1,3,5,6,7,8,9,10)],as.numeric.factor)
+
+
+head(echo_data_types)
+```
+
+
+
+#Missing data imputation 
+
+used random forests so that i wanted data within my range
+
+```{r}
+#imputing the data with random forests
+
+#install.packages("missForest")
+
+library(missForest)
+
+
+echo_mis <- missForest(echo_data_types[,-2], verbose = TRUE ,maxiter = 500, ntree = 500)
+
+echo_mis$ximp
+
+echo_mis$OOBerror
+
+
+  
+  
+```
+error is 25% which is scary so trying imputation by mice package
+
+trying imputation by mice package
+
+```{r}
+
+echo.mis.mice <- echo_data
+
+echo.mis.mice <- subset(echo_data_types, select = -c(still_alive))
+
+install.packages("VIM")
+
+#missing data distribution explorations
+
+library(VIM)
+
+mice_plot <- aggr(echo.mis.mice, col=c('navyblue','yellow'),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names(echo.mis.mice), cex.axis=.7,
+                    gap=3, ylab=c("Missing data","Pattern"))
+
+```
+
+as we can see ther is no pattern in missing data
+
+
+#trying mice package now..
+```{r}
+
+library(mice)
+
+imputed_Data <- mice(echo.mis.mice, m=5, maxit = 50, method = 'pmm', seed = 500)
+
+summary(imputed_Data)
+
+imputed_Data$imp$age_at_attack
+
+
+
+ fit <- with(data = imputed_Data, exp = lm(survival ~ age_at_attack+fractional_shortening+epss+lrdd+wall_motion_score+wall_motion_index+factor(alive_at_1)))
+
+ methods(vcov)
+ 
+#combine results of all 5 models
+ combine <- pool(fit)
+ summary(combine)
+ 
+ #taking the results from an iteration
+ completeData <- complete(imputed_Data,2)
+ 
+ complete_echo_data <- cbind(echo_data_types$still_alive,completeData)
+ 
+ colnames(complete_echo_data)[1] <- "still_alive"
+```
+
+decided to go with mice package since it was multiple iterations
+
+
+checking distributions 
+
+```{r}
+complete_echo_data
+
+library(psych)
+
+pairs.panels(complete_echo_data)
+
+#age is normally distributed
+hist(complete_echo_data$age_at_attack)
+
+# for survivors
+
+hist(sqrt(complete_echo_data$survival))
+
+#survivors can be transformed
+
+complete_echo_data$survival <- sqrt(complete_echo_data$survival)
+
+
+hist(complete_echo_data$fractional_shortening)
+
+#epss canbe log transformed
+complete_echo_data$epss <- log(complete_echo_data$epss)
+
+hist((complete_echo_data$epss))
+
+hist((complete_echo_data$lrdd))
+
+
+```
+
+
+
+
+
+#there was a null in one of the rows so got rid of the row
+and checked the distributions again along with the correlation
+only 2 variables which wer highly correlated but didnt get rid of it due to small dataset
+
+
+```{r}
+
+head(complete_echo_data)
+
+library(class)
+
+library(caret)
+
+complete_echo_data
+
+new_complete <- complete_echo_data[-50,]
+
+library(psych)
+
+pairs.panels(new_complete)
+
+```
+
+#outlier detection
+```{r}
+
+outliersZ <- function(data, zCutOff = 1.96, replace = NA, values = FALSE, digits = 2) {
+    #compute standard deviation (sample version n = n [not n-1])
+    stdev <- sqrt(sum((data - mean(data, na.rm = T))^2, na.rm = T) / sum(!is.na(data)))
+    #compute absolute z values for each value
+    absZ <- abs(data - mean(data, na.rm = T)) / stdev
+    #subset data that has absZ greater than the zCutOff and replace them with replace
+    #can also replace with other values (such as max/mean of data)
+    data[absZ > zCutOff] <- replace 
+    
+    if (values == TRUE) {
+        return(round(absZ, digits)) #if values == TRUE, return z score for each value
+    } else {
+        return(round(data, digits)) #otherwise, return values with outliers replaced
+    }
+}
+
+outliersZ(new_complete$survival)
+
+outliersZ(new_complete$age_at_attack)
+
+
+outliersZ(new_complete$fractional_shortening)
+
+outliersZ(new_complete$epss)
+
+outliersZ(new_complete$lrdd)
+
+outliersZ(new_complete$wall_motion_score)
+
+outliersZ(new_complete$malt)
+
+#removing outliers
+new_complete <- new_complete[-c(4,83,42),]
+
+```
+#only got rid of few extreme outliers
+
+
+Training and train control
+
+#applying PCA
+
+```{r}
+
+new_complete$epss[new_complete$epss== "-Inf"]<-0
+
+data1 <- as.data.frame(cbind(new_complete$survival,new_complete$age_at_attack,new_complete$fractional_shortening,new_complete$epss,new_complete$lrdd,new_complete$wall_motion_score,new_complete$wall_motion_index))
+
+data1 <- scale(data1)
+
+data1 <- cbind(data1,new_complete$still_alive,new_complete$pericardial_effusion,new_complete$alive_at_1)
+
+colnames(data1) <- c("survival","age_at_attack","fractional_shortening","epss","lrdd","wal_motion_score","wall_motion_index","still_alive","pericardial_effusion","alive_at_1")
+pca <- princomp(data1)
+
+#checking standard deviation and variances explained
+pca$sdev
+
+variances <- (pca$sdev)^2
+
+variances
+
+
+
+```
+
+#plotting PCA charts to explain the proportion of variance
+```{r}
+
+pcaCharts <- function(x) {
+    x.var <- x$sdev ^ 2
+    x.pvar <- x.var/sum(x.var)
+    print("proportions of variance:")
+    print(x.pvar)
+    
+    par(mfrow=c(2,2))
+    plot(x.pvar,xlab="Principal component", ylab="Proportion of variance explained", ylim=c(0,1),
+         type='b')
+    plot(cumsum(x.pvar),xlab="Principal component", ylab="Cumulative Proportion of variance explained",
+         ylim=c(0,1), type='b')
+    screeplot(x)
+    screeplot(x,type="l")
+    par(mfrow=c(1,1))
+}
+
+
+```
+
+```{r}
+pcaCharts(pca)
+
+
+```
+
+#as first 3 explain lot of varinaces
+
+```{r}
+pca$loadings[,1:3]
+```
+
+wall_motion_index has the highest effect in component 1 folowed by survival
+
+```{r}
+km <- kmeans(data1, centers=2)
+
+km$centers
+
+
+
+```
+
+pericardial,shortening,epss,lrdd,motion_score,motion_index score high on 2
+
+where as most of them have negative on 1 
+
+there may be possibility that cluster 2 is alive and cluster 1 is dead
+
+
+
+```{r}
+
+pca_res <- prcomp(as.matrix(data1), center = TRUE, scale. = TRUE)
+plot_data <- cbind(as.data.frame(pca_res$x[, 1:2]), labels = km$cluster)
+
+ggplot(plot_data, aes(x = PC1, y = PC2, colour = km$cluster)) +
+  geom_point()
+
+
+```
+
+
+
+
+#For all the model below used same data as train and test(important)
+
+
+
+#Applying the knn model to get maximum accuracy
+
+used the same data fro training and testing
+
+```{r}
+
+trainX <- complete_echo_data[,names(complete_echo_data)!= "still_alive"]
+
+preProcValues <- preProcess(x = trainX,method = c("center", "scale"))
+preProcValues
+
+summary(preProcValues)
+
+
+new_complete[new_complete$still_alive=="?"] <- NA
+
+
+new_complete$epss[new_complete$epss=="-Inf"] <- 0
+
+new_complete$still_alive <- factor(new_complete$still_alive)
+
+new_complete$pericardial_effusion <- factor(new_complete$pericardial_effusion)
+
+new_complete$alive_at_1 <- factor(new_complete$alive_at_1)
+
+#using caret package for training the model
+library(caret)
+set.seed(400)
+ctrl <- trainControl(method="repeatedcv",repeats = 3) 
+
+knnFit <- train(still_alive ~ ., data =new_complete, method = "knn", trControl = ctrl, tuneLength = 20)
+
+knnFit
+
+knnPredict <- predict(knnFit,newdata = new_complete[,-1])
+
+knnPredict
+
+
+
+confusionMatrix(knnPredict, new_complete$still_alive )
+
+
+plot(knnFit)
+
+#findidng area under the curve using auc models
+install.packages("ROCR")
+library(ROCR)
+
+
+install.packages("pROC")
+
+library(pROC)
+
+
+
+roc_obj <- roc(as.numeric(new_complete$still_alive),as.numeric(knnPredict))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(new_complete$still_alive),as.numeric(knnPredict))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+```
+
+
+#Using neural net to train the models
+
+alternatively using caret package so as to tune it and get the maximum accuaracy
+
+```{r}
+
+#Defining the training control
+fitControl <- trainControl(
+method = "cv",
+number = 10,
+savePredictions = 'final', # To save out of fold predictions for best parameter combinantions
+classProbs = T # To save the class probabilities of the out of fold predictions
+)
+
+head(new_complete)
+
+#Defining the predictors and outcome
+predictors<-c("survival", "age_at_attack", "pericardial_effusion", "fractional_shortening",
+"epss","lrdd","wall_motion_score","wall_motion_index","malt","alive_at_1")
+
+outcomeName<-"still_alive"
+
+
+lat_complete <- new_complete
+
+feature.names=names(lat_complete)
+
+for (f in feature.names) {
+  if (class(lat_complete[[f]])=="factor") {
+    levels <- unique(c(lat_complete[[f]]))
+    lat_complete[[f]] <- factor(lat_complete[[f]],
+                   labels=make.names(levels))
+  }
+}
+
+
+#Training the neural_net forest model
+model_nn<-train(lat_complete[,c("survival", "age_at_attack", "pericardial_effusion","fractional_shortening","epss","lrdd","wall_motion_score","wall_motion_index","malt","alive_at_1")
+],lat_complete[,"still_alive"],method='nnet',trControl=fitControl,tuneLength=10)  
+
+
+
+nnet.fit <-  predict(model_nn,newdata = lat_complete[,-1])
+
+#finding confusion matrix ,area under the curve  and potting it
+confusionMatrix(nnet.fit, lat_complete$still_alive )
+
+roc_obj <- roc(as.numeric(new_complete$still_alive),as.numeric(nnet.fit))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(new_complete$still_alive),as.numeric(nnet.fit))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+                
+```
+
+
+#using logistic regression 
+
+```{r}
+
+
+model_lgr<-glm(factor(still_alive) ~ survival+age_at_attack+factor(pericardial_effusion)+fractional_shortening+epss+
+                   lrdd+wall_motion_score+wall_motion_index+factor(alive_at_1),data=new_complete, family="binomial")  
+
+summary(model_lgr)
+
+#using aic model to find statistically significant beta values
+backwards = step(model_lgr)
+
+final_model <- glm(factor(still_alive) ~ age_at_attack+factor(alive_at_1)+fractional_shortening+survival,data=new_complete, family="binomial")  
+
+
+summary(final_model)
+
+lrg.fit <-  predict(final_model,newdata = new_complete[,-1])
+
+lrg.fit <- ifelse(lrg.fit<0.5,0,1)
+
+
+#constructing confusion matrix and plotted auc curve
+confusionMatrix(lrg.fit, new_complete$still_alive )
+
+
+roc_obj <- roc(as.numeric(new_complete$still_alive),as.numeric(lrg.fit ))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(new_complete$still_alive),as.numeric(lrg.fit ))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+
+```
+
+
+
+#random forests(one of the most powerful algorithms)
+
+
+```{r}
+
+model_rf<-train(lat_complete[,c("survival", "age_at_attack", "pericardial_effusion","fractional_shortening","epss","lrdd","wall_motion_score","wall_motion_index","malt","alive_at_1")
+],lat_complete[,"still_alive"],method='rf',trControl=fitControl,tuneLength=10)  
+
+
+rf.fit <-  predict(model_rf,newdata = lat_complete[,-1])
+
+
+confusionMatrix(rf.fit, lat_complete$still_alive )
+
+roc_obj <- roc(as.numeric(new_complete$still_alive),as.numeric(rf.fit))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(new_complete$still_alive),as.numeric(rf.fit))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+
+
+```
+
+
+# strongest algorithm is random forest but model is clearly overfitting
+
+
+#constructing an ensemblar using outputs from models which gave me the highest accuracy using maximum vote
+
+```{r}
+
+nnet.fit <- ifelse(nnet.fit=="X1",0,1)
+
+rf.fit <- ifelse(rf.fit=="X1",0,1)
+
+lrg.fit
+
+
+net.fit <- as.data.frame(nnet.fit)
+
+r.fit <- as.data.frame(rf.fit)
+
+lr.fit <- as.data.frame(lrg.fit)
+                 
+r <- NA                 
+#taking maximum vote
+for(i in 1:nrow(net.fit))
+{test <- ifelse(net.fit[i,]==1 & lr.fit[i,]==1,1,
+                ifelse(r.fit[i,]==1 & net.fit[i,]==1,1,ifelse(lr.fit[i,]==1 & r.fit[i,]==1,1,0)))
+               r <- c(r,test) 
+               print(r)}
+
+
+final_ensemblar_prediction <- r[-1]
+
+
+confusionMatrix(final_ensemblar_prediction, new_complete$still_alive)
+
+roc_obj <- roc(as.numeric(new_complete$still_alive),as.numeric(final_ensemblar_prediction))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(new_complete$still_alive),as.numeric(final_ensemblar_prediction))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+
+```
+
+
+#using a stacked model
+#using logistic_regression,random forests and neuralnet as bottom layers and gradient boosting in the topp layer
+
+```{r}
+full_ensemblarset <- cbind(net.fit,r.fit,lr.fit,new_complete$still_alive)
+
+colnames(full_ensemblarset) <- c("neural","random_forest","logistic","still_alive")
+
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+
+full_ensemblarset$still_alive <- as.numeric.factor(full_ensemblarset$still_alive)
+
+model_gbm<- 
+train(full_ensemblarset[, c("neural","random_forest","logistic")],full_ensemblarset[,"still_alive"],method='gbm',trControl=fitControl,tuneLength=10)
+
+
+gbm.fit <- predict(model_gbm,full_ensemblarset[, c("neural","random_forest","logistic")])
+
+gbm.fit
+
+gbm.fit <- ifelse(gbm.fit<0.5,0,1)
+
+confusionMatrix(gbm.fit, new_complete$still_alive)
+
+roc_obj <- roc(as.numeric(new_complete$still_alive),as.numeric(gbm.fit))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(new_complete$still_alive),as.numeric(gbm.fit))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+```
+
+#to solve the problem of over fitting i used SMOT algorithm to oversample then converted into train and test data
+
+```{r}
+#install.packages("DMwR")
+
+library(DMwR)
+
+
+
+#more_compu$still_alive <- factor(new_complete$still_alive )
+
+#more_compu$pericardial_effusion <- factor(new_complete$pericardial_effusion)
+
+#more_compu$alive_at_1 <- factor(new_complete$alive_at_1)
+
+
+
+# dividing into train and test 
+
+smp_size <- floor(0.6106870229 * nrow(new_complete))
+
+## set the seed to make your partition reproductible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(new_complete)), size = smp_size)
+
+train <- new_complete[train_ind, ]
+test <- new_complete[-train_ind, ]
+
+test <- test[-11,]
+
+test
+
+prop.table(table(train$still_alive))
+
+
+
+echo_smote <- SMOTE(still_alive~.,data = train,perc.over = 100, perc.under = 200)
+
+
+prop.table(table(echo_smote$still_alive))
+
+echo_smote
+
+
+
+```
+
+
+
+Applying logistic regression
+
+```{r}
+
+lgr_model<-glm(still_alive ~ survival+age_at_attack+factor(pericardial_effusion)+fractional_shortening+epss+
+                   lrdd+wall_motion_score+wall_motion_index+malt+factor(alive_at_1),data=echo_smote, family="binomial")  
+
+summary(lgr_model)
+
+backwards_smote = step(lgr_model)
+
+
+final_model <- glm(still_alive ~ age_at_attack+fractional_shortening+factor(alive_at_1)+epss+wall_motion_index+survival,data=new_complete, family="binomial")  
+
+
+summary(final_model)
+
+lrg.fit <-  predict(final_model,newdata = test[,-1])
+
+lrg.fit <- ifelse(lrg.fit<0.5,0,1)
+
+confusionMatrix(lrg.fit, test$still_alive )
+
+
+roc_obj <- roc(as.numeric(test$still_alive),as.numeric(lrg.fit ))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(test$still_alive),as.numeric(lrg.fit ))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+
+
+```
+
+#Model is doing well seems like there is no overfitting in the model
+
+
+#trying the neural net model
+
+```{r}
+
+
+traning <- train
+
+testing <- test
+
+
+
+for (f in feature.names) {
+  if (class(traning[[f]])=="factor") {
+    levels <- unique(c(traning[[f]]))
+    traning[[f]] <- factor(traning[[f]],
+                   labels=make.names(levels))
+  }
+}
+
+numFolds <- trainControl(method = 'cv', number = 10, classProbs = TRUE, verboseIter = TRUE, summaryFunction = twoClassSummary, preProcOptions = list(thresh = 0.75, ICAcomp = 3, k = 5))
+
+model_nn<-train(traning[,c("survival", "age_at_attack", "pericardial_effusion","fractional_shortening","epss","lrdd","wall_motion_score","wall_motion_index","malt","alive_at_1")
+],traning[,"still_alive"],method='nnet', preProcess = c('center', 'scale'),trControl=fitControl,tuneLength=10)  
+
+
+#test$pericardial_effusion <- factor(testing$pericardial_effusion)
+
+for (f in feature.names) {
+  if (class(testing[[f]])=="factor") {
+    levels <- unique(c(testing[[f]]))
+    testing[[f]] <- factor(testing[[f]],
+                   labels=make.names(levels))
+  }
+}
+
+
+
+nnet.fit <-  predict(model_nn,newdata = testing[,-1])
+
+
+confusionMatrix(nnet.fit, testing$still_alive )
+
+roc_obj <- roc(as.numeric(testing$still_alive),as.numeric(nnet.fit))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(testing$still_alive),as.numeric(nnet.fit))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+```
+#clearly neural net does not perform well.
+
+
+#trying random forest model
+```{r}
+
+model_rf<-train(traning[,c("survival", "age_at_attack", "pericardial_effusion","fractional_shortening","epss","lrdd","wall_motion_score","wall_motion_index","malt","alive_at_1")
+],traning[,"still_alive"],method='rf',trControl=fitControl,tuneLength=10)  
+
+new_testing <- testing[,-1]
+
+
+
+new_testing$alive_at_1 <- factor(new_testing$alive_at_1, levels = levels(traning$alive_at_1))
+
+
+
+rf.fit <-  predict(model_rf,new_testing)
+
+rf.fit
+
+
+confusionMatrix(rf.fit,testing$still_alive)
+
+roc_obj <- roc(as.numeric(testing$still_alive),as.numeric(rf.fit))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(testing$still_alive),as.numeric(rf.fit))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+
+
+```
+#random forest also does not perform well as it goves very less accuracy
+
+#trying an ensemble model by taking maximum vote
+```{r}
+
+nnet.fit <- ifelse(nnet.fit=="X1",0,1)
+
+rf.fit <- ifelse(rf.fit=="X1",0,1)
+
+
+nnet.fit<- as.data.frame(nnet.fit)
+
+rf.fit <- as.data.frame(rf.fit)
+
+lrg.fit <- as.data.frame(lrg.fit)
+
+full_ensemblarset <- as.data.frame(cbind(nnet.fit,rf.fit,lrg.fit,test$still_alive))
+
+colnames(full_ensemblarset) <- c("neural","random_forest","logistic","still_alive")
+
+
+
+r<- NA
+
+for(i in 1:nrow(nnet.fit))
+{nw_test <- ifelse(nnet.fit[i,]==1 & lrg.fit[i,]==1,1,
+                ifelse(rf.fit[i,]==1 & nnet.fit[i,]==1,1,ifelse(lrg.fit[i,]==1 & rf.fit[i,]==1,1,0)))
+               r <- c(r,nw_test) 
+               print(r)}
+
+
+maximum_vote <- r[-1]
+
+
+
+confusionMatrix(maximum_vote,full_ensemblarset$still_alive)
+
+#colnames(full_ensemblarset) <- c("neural","random_forest","logistic","still_alive")
+
+
+
+
+
+```
+#even this ensemble model does not do well so lets try with a stacked model
+#bottom layers are logistic,neural and random . Top layer is gradient boosting
+
+```{r}
+
+
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+
+full_ensemblarset$still_alive <- as.numeric.factor(full_ensemblarset$still_alive)
+
+model_gbm<- 
+train(full_ensemblarset[, c("neural","random_forest","logistic")],full_ensemblarset[,"still_alive"],method='gbm',trControl=fitControl,tuneLength=10)
+
+gbm.fit <- predict(model_gbm,full_ensemblarset[, c("neural","random_forest","logistic")])
+
+gbm.fit
+
+gbm.fit <- ifelse(gbm.fit<0.5,0,1)
+confusionMatrix(gbm.fit, full_ensemblarset$still_alive)
+
+roc_obj <- roc(as.numeric(full_ensemblarset$still_alive),as.numeric(gbm.fit))
+
+auc(roc_obj)
+
+
+
+roc_full_resolution <- roc(as.numeric(full_ensemblarset$still_alive),as.numeric(gbm.fit))
+
+# very good area under the curve
+plot(roc_full_resolution, print.auc=TRUE)
+
+
+
+```
+
+
+#as we can see the stacked model is doing well.
+
+#so always be careful of the overfitting. if you overfit the model your predictions can go way out of range so i used oversmapling and converted them into train and test and found that neural and rf was overfit . The stacked model did good.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
